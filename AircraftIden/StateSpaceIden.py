@@ -14,7 +14,7 @@ import sys
 
 class StateSpaceIdenSIMO(object):
     def __init__(self, freqres, nw=20, enable_debug_plot=False, max_sample_times=20, accept_J=5,
-                 y_names=None, reg = 1.0, cpu_use = None, iter_callback = None):
+                 y_names=None, reg = 1.0, cpu_use = None, iter_callback = None, con_str = None):
         self.freq = freqres.freq
         self.Hs = freqres.Hs
         self.wg = 1.0
@@ -38,7 +38,7 @@ class StateSpaceIdenSIMO(object):
         self.fig = None
 
         self.cpu_use = cpu_use
-
+        self.con_str = con_str
         self.iter_callback= iter_callback
     
     def print_res(self):
@@ -52,14 +52,21 @@ class StateSpaceIdenSIMO(object):
         print("B")
         print(ssm.B)
         
-    def estimate(self, sspm: StateSpaceParamModel, syms, omg_min=None, omg_max=None, constant_defines=None, rand_init_max = 1):
+    def estimate(self, sspm: StateSpaceParamModel, syms, omg_min=None, omg_max=None, constant_defines=None, rand_init_max = 1, bounds=None):
         assert self.y_dims == sspm.y_dims, "StateSpaceModel dim : {} need to iden must have same dims with Hs {}".format(
             sspm.y_dims, self.y_dims)
 
         if constant_defines is None:
             constant_defines = dict()
         self.init_omg_list(omg_min, omg_max)
-        self.rand_init_max = rand_init_max
+
+        if bounds is None:
+            self.lower_bnd=None
+            self.upper_bnd=None
+            self.rand_init_max = rand_init_max
+        else:
+            self.lower_bnd=bounds[0]
+            self.upper_bnd=bounds[1]
 
         self.syms = syms
         sspm.load_constant_defines(constant_defines)
@@ -113,6 +120,7 @@ class StateSpaceIdenSIMO(object):
         while not should_exit_pool:
             if results.__len__() == 0:
                 print("All in pool finish")
+                print("Using J {} x {}".format(J, x_tmp))
                 break
             for i in range(results.__len__()):
                 thr = results[i]
@@ -121,6 +129,7 @@ class StateSpaceIdenSIMO(object):
                     if J < self.J_min:
                         self.J_min = J
                         self.x_best = x_tmp
+                        print("results {}".format(x_tmp))
                         print("Found new better {}".format(J))
 
                         if self.enable_debug_plot:
@@ -129,7 +138,7 @@ class StateSpaceIdenSIMO(object):
                     if J < self.accept_J:
                         # print("Terminate pool")
                         pool.terminate()
-                        # print("Using J {} x {}".format(self.J_min, self.x_best))
+                        print("Using J {} x {}".format(self.J_min, self.x_best))
                         return self.J_min, self.x_best
                     
                     del results[i]
@@ -145,22 +154,39 @@ class StateSpaceIdenSIMO(object):
         print(x_state)
         sys.stdout.flush()
 
+    def initvals_w_bounds(self,lbnd,ubnd):
+        ret = lbnd + np.random.rand()*(ubnd - lbnd)
+        return ret
+
     def solve(self, id=0):
-        print("Solve id {}".format(id))
+#        print("Solve id {}".format(id))
 
         sspm = copy.deepcopy(self.sspm)
         f = lambda x: self.cost_func(sspm, x)
-        x0 = self.setup_initvals(sspm)
+
         con = {'type': 'ineq', 'fun': lambda x: self.constrain_func(sspm,x)}
         opts = {'maxiter':10000}
 
-        print("{} using init {}".format(id, x0))
+        #print("{} using init {}".format(id, x0))
         sys.stdout.flush()
 
-        ret = minimize(f, x0,constraints=con,options=opts)
+        if self.lower_bnd is None:
+            x0 = self.setup_initvals(sspm)
+            bnds = None
+        else:
+            x0 = np.zeros(self.lower_bnd.__len__())         
+            bnds = []
+            for k in range(self.lower_bnd.__len__()):
+                x0[k] = self.initvals_w_bounds(self.lower_bnd[k],self.upper_bnd[k])
+                bnds.append((self.lower_bnd[k],self.upper_bnd[k]))
+
+        print("{} using init {}".format(id, x0))            
+        ret = minimize(f, x0,constraints=con,options=opts,bounds=bnds)
         x = ret.x.copy()
         J = ret.fun
+        print("id: {}, cost: {}".format(id,J))
         return J, x
+
 
     def cost_func(self, sspm: StateSpaceParamModel, x):
         sym_sub = dict()
@@ -206,6 +232,27 @@ class StateSpaceIdenSIMO(object):
         sym_sub = dict()
         assert len(x) == len(self.x_syms), 'State length must be equal with x syms'
         # setup state x
+        # user defined constraints
+        if self.con_str:
+            param1 = self.con_str[0]
+            param2 = self.con_str[1]
+            is_negative = param2.startswith('-')
+            param2 = param2.lstrip('-')
+            try:
+                param1_index = self.x_syms.index(sp.symbols(param1))
+            except ValueError as e:
+                raise ValueError(f"Error: Symbol {param1} not found in self.x_syms. Cannot continue.") from e
+
+            try:
+                param2_index = self.x_syms.index(sp.symbols(param2))
+            except ValueError as e:
+                raise ValueError(f"Error: Symbol {param2} not found in self.x_syms. Cannot continue.") from e
+                
+            if is_negative:
+                x[param1_index] = -x[param2_index]
+            else:
+                x[param1_index] = x[param2_index]
+
         sym_sub = dict(zip(self.x_syms, x))
         ssm = sspm.get_ssm_by_syms(sym_sub, using_converted=True)
         Amat = ssm.A
@@ -231,7 +278,7 @@ class StateSpaceIdenSIMO(object):
         self.fig, self.axs = plt.subplots(self.y_dims, 1, sharey=True)
         fig, axs = self.fig, self.axs
         fig.set_size_inches(15, 7)
-        fig.canvas.set_window_title('FreqRes vs est')
+        #fig.canvas.set_window_title('FreqRes vs est')
         fig.tight_layout()
         fig.subplots_adjust(right=0.9)
         Hest = copy.deepcopy(self.Hs)
@@ -252,7 +299,11 @@ class StateSpaceIdenSIMO(object):
             amp0, pha0 = FreqIdenSIMO.get_amp_pha_from_h(self.Hs[y_index])
             amp1, pha1 = FreqIdenSIMO.get_amp_pha_from_h(Hest[y_index])
             # amp1, pha1 = amp0, pha0
-            ax1 = axs[y_index]
+            if y_index > 1:
+                ax1 = axs[y_index]
+            else:
+                ax1 = axs
+
             if self.y_names is not None:
                 ax1.title.set_text(self.y_names[y_index])
 
@@ -261,7 +312,11 @@ class StateSpaceIdenSIMO(object):
             ax1.set_ylabel('db', color='tab:blue')
             ax1.grid(which="both")
 
-            ax2 = axs[y_index].twinx()
+            if y_index > 1:
+                ax2 = axs[y_index].twinx()
+            else:
+                ax2 = axs
+
             ax2.set_ylabel('deg', color='tab:orange')
             ax2.tick_params('y', colors='tab:orange')
 
@@ -269,7 +324,12 @@ class StateSpaceIdenSIMO(object):
             p4, = ax2.semilogx(self.freq, pha1, color='tab:orange', label="phaest")
             # ax2.grid(which="both")
 
-            ax3 = ax1.twinx()
+            if y_index > 1:
+                ax3 = ax1.twinx()
+            else:
+                ax3 = axs
+
+            ax3 = axs
             # ax3.grid(which="both")
             p5, = ax3.semilogx(self.freq, self.coherens[y_index], color='tab:gray', label="Coherence")
 
@@ -285,7 +345,6 @@ class StateSpaceIdenSIMO(object):
         source_syms_dims = sspm.syms.__len__()
         source_syms_init_vals = (np.random.rand(source_syms_dims) * 2 - 1) * self.rand_init_max
         subs = dict(zip(source_syms, source_syms_init_vals))
-
         x0 = np.zeros(self.x_dims)
         for i in range(self.x_dims):
             sym = self.x_syms[i]

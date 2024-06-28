@@ -77,7 +77,12 @@ class TransferFunctionModel(object):
             pha = np.arctan2(h.imag, h.real) * 180 / math.pi
         return amp, pha
     
-    
+    def coeff(self):
+        num = self.num
+        den = self.den
+        tau = self.tau
+        return num, den, tau
+
     def plot(self, freq = None):
         if freq is None:
             freq = np.linspace(1.0,10,10)
@@ -95,7 +100,6 @@ class TransferFunctionModel(object):
         den = self.den
         tau = self.tau
         return r"$\frac{" + poly_latex(num) + "}{" + poly_latex(den) +"}" + "e^{-" + "{:4.5f}".format(tau) + "t}$"
-
     
 
 class TransferFunctionParamModel(object):
@@ -159,7 +163,7 @@ class TransferFunctionParamModel(object):
         frac_part = r"$\frac{" + latex(self.num.subs(sub)) + "}{" + latex(self.den.subs(sub)) + "}"
         tau_part =  "" if self.tau == 0 else ("e^{-" + "{:4.6f}".format(self.tau.subs(sub)) + "t}$")
         return frac_part + tau_part
-
+    
 class TransferFunctionFit(object):
     def __init__(self, freq, H, coheren, tfpm, nw=20,
                  iter_times = 10,has_addition_integral = False,reg = 0.1):
@@ -205,6 +209,10 @@ class TransferFunctionFit(object):
         else:
             return self.tf.latex()
 
+    def get_coefficients(self):
+        num, den, tau = self.tf.coeff()
+        return num,den,tau
+    
     def cost_func_at_omg_ptr(self, tf, omg_ptr):
         omg = self.source_freq[omg_ptr]
 
@@ -363,7 +371,7 @@ class TransferFunctionFit(object):
 
 def siso_freq_iden():
     # save_data_list = ["running_time", "yoke_pitch", "theta", "airspeed", "q", "aoa", "VVI", "alt"]
-    arr = np.load("../../XPlaneResearch/data/sweep_data_2017_12_10_19_05.npy")
+    arr = np.load("/home/astik/pyAircraftIden/data/sweep_data_2017_12_10_19_05.npy")
     time_seq_source = arr[:, 0]
     ele_seq_source = arr[:, 1]
     q_seq_source = arr[:, 4]*math.pi / 180
