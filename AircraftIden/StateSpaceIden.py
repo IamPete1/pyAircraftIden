@@ -40,6 +40,9 @@ class StateSpaceIdenSIMO(object):
         self.cpu_use = cpu_use
         self.con_str = con_str
         self.iter_callback= iter_callback
+        self.param1_index = -1
+        self.param2_index = -1
+        self.is_negative = False
     
     def print_res(self):
         assert self.x_best is not None, "You must estimate first"
@@ -52,6 +55,22 @@ class StateSpaceIdenSIMO(object):
         print("B")
         print(ssm.B)
         
+    def user_constrain_index(self):
+        if self.con_str:
+            param1 = self.con_str[0]
+            param2 = self.con_str[1]
+            self.is_negative = param2.startswith('-')
+            param2 = param2.lstrip('-')
+            try:
+                self.param1_index = self.x_syms.index(sp.symbols(param1))
+            except ValueError as e:
+                raise ValueError(f"Error: Symbol {param1} not found in self.x_syms. Cannot continue.") from e
+
+            try:
+                self.param2_index = self.x_syms.index(sp.symbols(param2))
+            except ValueError as e:
+                raise ValueError(f"Error: Symbol {param2} not found in self.x_syms. Cannot continue.") from e
+
     def estimate(self, sspm: StateSpaceParamModel, syms, omg_min=None, omg_max=None, constant_defines=None, rand_init_max = 1, bounds=None):
         assert self.y_dims == sspm.y_dims, "StateSpaceModel dim : {} need to iden must have same dims with Hs {}".format(
             sspm.y_dims, self.y_dims)
@@ -74,7 +93,7 @@ class StateSpaceIdenSIMO(object):
         self.x_dims = len(self.x_syms)
         assert self.x_dims == len(self.syms), "Every unknown param must be provide in syms!"
         print("Will estimate num {} {}".format(self.x_syms.__len__(), self.x_syms))
-
+        self.user_constrain_index()
 
         if self.max_sample_times > 1:
             J, x = self.parallel_solve(sspm)
@@ -154,13 +173,63 @@ class StateSpaceIdenSIMO(object):
         print(x_state)
         sys.stdout.flush()
 
-    def initvals_w_bounds(self,lbnd,ubnd):
-        ret = lbnd + np.random.rand()*(ubnd - lbnd)
-        return ret
+    # def initvals_w_bounds(self,lbnd,ubnd):
+    #     ret = lbnd + np.random.rand()*(ubnd - lbnd)
+    #     return ret
 
+    # def setup_initvals(self, sspm):
+    #     print("Start setup init")
+    #     source_syms = sspm.syms
+    #     source_syms_dims = sspm.syms.__len__()
+    #     source_syms_init_vals = (np.random.rand(source_syms_dims) * 2 - 1) * self.rand_init_max
+    #     subs = dict(zip(source_syms, source_syms_init_vals))
+    #     x0 = np.zeros(self.x_dims)
+    #     for i in range(self.x_dims):
+    #         sym = self.x_syms[i]
+    #         sym_def = sspm.new_params_raw_defines[sym]
+    #         v = sym_def.evalf(subs=subs)
+    #         x0[i] = v
+    #     return x0
+    
+    def setup_initvals(self,sspm):
+        print("Start setup init")
+        x0 = np.zeros(self.x_dims)
+        print("before madness")
+        if self.lower_bnd:
+            for k in range(self.x_dims):
+                if self.con_str:
+                    if k == self.param2_index:
+                        if self.is_negative:
+                            x0[k] = -x0[self.param1_index]
+                        else:
+                            x0[k] = x0[self.param1_index]
+                        continue
+
+                lbnd = self.lower_bnd[k]
+                ubnd = self.upper_bnd[k]
+                ret = lbnd + np.random.rand()*(ubnd - lbnd)
+                x0[k] = ret
+        else:
+            source_syms = sspm.syms
+            source_syms_dims = sspm.syms.__len__()
+            source_syms_init_vals = (np.random.rand(source_syms_dims) * 2 - 1) * self.rand_init_max
+            subs = dict(zip(source_syms, source_syms_init_vals))
+            for i in range(self.x_dims):
+                sym = self.x_syms[i]
+                sym_def = sspm.new_params_raw_defines[sym]
+                v = sym_def.evalf(subs=subs)
+                x0[i] = v
+                if self.con_str:
+                    if i == self.param2_index:
+                        if self.is_negative:
+                            x0[i] = -x0[self.param1_index]
+                        else:
+                            x0[i] = x0[self.param1_index]
+                        continue
+      
+        return x0
+                
     def solve(self, id=0):
-#        print("Solve id {}".format(id))
-
         sspm = copy.deepcopy(self.sspm)
         f = lambda x: self.cost_func(sspm, x)
 
@@ -170,18 +239,19 @@ class StateSpaceIdenSIMO(object):
         #print("{} using init {}".format(id, x0))
         sys.stdout.flush()
 
-        if self.lower_bnd is None:
-            x0 = self.setup_initvals(sspm)
-            bnds = None
-        else:
-            x0 = np.zeros(self.lower_bnd.__len__())         
-            bnds = []
+        x0 = self.setup_initvals(sspm)
+        bnds = None
+        bnds = []
+        print("{} using init {}".format(id, x0))            
+
+        if self.lower_bnd:
             for k in range(self.lower_bnd.__len__()):
-                x0[k] = self.initvals_w_bounds(self.lower_bnd[k],self.upper_bnd[k])
                 bnds.append((self.lower_bnd[k],self.upper_bnd[k]))
 
-        print("{} using init {}".format(id, x0))            
-        ret = minimize(f, x0,constraints=con,options=opts,bounds=bnds)
+            ret = minimize(f, x0,constraints=con,options=opts,bounds=bnds)
+        else:
+            ret = minimize(f, x0,constraints=con,options=opts)
+
         x = ret.x.copy()
         J = ret.fun
         print("id: {}, cost: {}".format(id,J))
@@ -233,25 +303,25 @@ class StateSpaceIdenSIMO(object):
         assert len(x) == len(self.x_syms), 'State length must be equal with x syms'
         # setup state x
         # user defined constraints
-        if self.con_str:
-            param1 = self.con_str[0]
-            param2 = self.con_str[1]
-            is_negative = param2.startswith('-')
-            param2 = param2.lstrip('-')
-            try:
-                param1_index = self.x_syms.index(sp.symbols(param1))
-            except ValueError as e:
-                raise ValueError(f"Error: Symbol {param1} not found in self.x_syms. Cannot continue.") from e
+        # if self.con_str:
+        #     param1 = self.con_str[0]
+        #     param2 = self.con_str[1]
+        #     is_negative = param2.startswith('-')
+        #     param2 = param2.lstrip('-')
+        #     try:
+        #         param1_index = self.x_syms.index(sp.symbols(param1))
+        #     except ValueError as e:
+        #         raise ValueError(f"Error: Symbol {param1} not found in self.x_syms. Cannot continue.") from e
 
-            try:
-                param2_index = self.x_syms.index(sp.symbols(param2))
-            except ValueError as e:
-                raise ValueError(f"Error: Symbol {param2} not found in self.x_syms. Cannot continue.") from e
-                
-            if is_negative:
-                x[param1_index] = -x[param2_index]
+        #     try:
+        #         param2_index = self.x_syms.index(sp.symbols(param2))
+        #     except ValueError as e:
+        #         raise ValueError(f"Error: Symbol {param2} not found in self.x_syms. Cannot continue.") from e
+        if self.con_str:        
+            if self.is_negative:
+                x[self.param1_index] = -x[self.param2_index]
             else:
-                x[param1_index] = x[param2_index]
+                x[self.param1_index] = x[self.param2_index]
 
         sym_sub = dict(zip(self.x_syms, x))
         ssm = sspm.get_ssm_by_syms(sym_sub, using_converted=True)
@@ -338,20 +408,6 @@ class StateSpaceIdenSIMO(object):
             lines = [p1, p2, p3, p4]
 
             ax1.legend(lines, [l.get_label() for l in lines])
-
-    def setup_initvals(self, sspm):
-        print("Start setup init")
-        source_syms = sspm.syms
-        source_syms_dims = sspm.syms.__len__()
-        source_syms_init_vals = (np.random.rand(source_syms_dims) * 2 - 1) * self.rand_init_max
-        subs = dict(zip(source_syms, source_syms_init_vals))
-        x0 = np.zeros(self.x_dims)
-        for i in range(self.x_dims):
-            sym = self.x_syms[i]
-            sym_def = sspm.new_params_raw_defines[sym]
-            v = sym_def.evalf(subs=subs)
-            x0[i] = v
-        return x0
 
     def init_omg_list(self, omg_min, omg_max):
         if omg_min is None:
